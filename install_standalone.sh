@@ -8,15 +8,37 @@
 set -e
 
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'
-BLUE='\033[0;34m'; CYAN='\033[0;36f'; BOLD='\033[1m'; NC='\033[0m'
+BLUE='\033[0;34m'; CYAN='\033[0;36m'; BOLD='\033[1m'; NC='\033[0m'
 ok()   { echo -e "${GREEN}  ✔  $*${NC}"; }
 info() { echo -e "${CYAN}  →  $*${NC}"; }
 warn() { echo -e "${YELLOW}  ⚠  $*${NC}"; }
-fail() { echo -e "${RED}  ✖  $*${NC}"; exit 1; }
+fail() { echo -e "${RED}  ✖  $*${NC}\n"; echo -e "${YELLOW}  Détails de l'erreur : ${LOGFILE}${NC}"; exit 1; }
 step() { echo -e "\n${BOLD}${BLUE}[$1] $2${NC}"; }
+
+# Fichier log pour toute la sortie verbeuse (apt, pip…)
+LOGFILE="/tmp/smartvision-install.log"
+: > "$LOGFILE"
+
+# run "message" commande…  → affiche le message, exécute en silence,
+# et n'affiche les détails QUE si la commande échoue
+run() {
+    local msg="$1"; shift
+    printf "${CYAN}  →  %s...${NC}" "$msg"
+    if "$@" >> "$LOGFILE" 2>&1; then
+        printf "\r${GREEN}  ✔  %s      ${NC}\n" "$msg"
+    else
+        printf "\r${RED}  ✖  %s${NC}\n" "$msg"
+        echo -e "${YELLOW}  ── Dernières lignes du log : ────────────────${NC}"
+        tail -n 15 "$LOGFILE" | sed 's/^/     /'
+        echo -e "${YELLOW}  ─────────────────────────────────────────────${NC}"
+        echo -e "${YELLOW}  Log complet : ${LOGFILE}${NC}"
+        exit 1
+    fi
+}
 
 [ "$EUID" -ne 0 ] && fail "Lancez avec sudo : sudo ./install_standalone.sh"
 
+clear
 echo -e "\n${BOLD}${CYAN}"
 echo "  ╔══════════════════════════════════════════════╗"
 echo "  ║       SmartVision — Installation v2          ║"
@@ -28,13 +50,13 @@ REAL_USER=${SUDO_USER:-$(logname 2>/dev/null || echo pi)}
 INSTALL_DIR="/home/${REAL_USER}/videoplayer"
 info "Utilisateur : ${REAL_USER}"
 info "Répertoire  : ${INSTALL_DIR}"
+info "Journal     : ${LOGFILE}"
 
 step "1/6" "Mise à jour et dépendances système"
-apt-get update -qq
-apt-get install -y -qq \
+run "Mise à jour des paquets (apt update)" apt-get update -qq
+run "Installation mpv, weston, ffmpeg, python" apt-get install -y -qq \
     mpv weston python3-pip python3-venv \
-    libegl-mesa0 libgles2 libwayland-egl1 mesa-utils socat \
-    ffmpeg 2>/dev/null || true
+    libegl-mesa0 libgles2 libwayland-egl1 mesa-utils socat ffmpeg
 command -v mpv     >/dev/null || fail "MPV non installé"
 command -v weston  >/dev/null || fail "Weston non installé"
 command -v python3 >/dev/null || fail "Python3 non installé"
@@ -54,12 +76,19 @@ chown -R "${REAL_USER}:${REAL_USER}" "${INSTALL_DIR}"
 ok "Fichiers déployés"
 
 step "4/6" "Environnement Python"
-if [ ! -d "${INSTALL_DIR}/venv" ]; then
-    sudo -u "${REAL_USER}" python3 -m venv "${INSTALL_DIR}/venv"
+# Recréer le venv s'il est absent OU corrompu (python injouable)
+if [ ! -x "${INSTALL_DIR}/venv/bin/python" ] || \
+   ! "${INSTALL_DIR}/venv/bin/python" -c "import sys" >/dev/null 2>&1; then
+    [ -d "${INSTALL_DIR}/venv" ] && { info "Venv absent ou corrompu — recréation"; rm -rf "${INSTALL_DIR}/venv"; }
+    run "Création de l'environnement Python" \
+        sudo -u "${REAL_USER}" python3 -m venv "${INSTALL_DIR}/venv"
 fi
-sudo -u "${REAL_USER}" "${INSTALL_DIR}/venv/bin/pip" install --quiet \
+run "Mise à jour de pip" \
+    sudo -u "${REAL_USER}" "${INSTALL_DIR}/venv/bin/pip" install --quiet --upgrade pip
+run "Installation fastapi, uvicorn, python-multipart" \
+    sudo -u "${REAL_USER}" "${INSTALL_DIR}/venv/bin/pip" install --quiet \
     fastapi "uvicorn[standard]" python-multipart
-ok "Venv prêt : $(${INSTALL_DIR}/venv/bin/python --version)"
+ok "Venv prêt : $(${INSTALL_DIR}/venv/bin/python --version 2>&1)"
 
 step "5/6" "Services systemd"
 info "Configuration weston (masquage du panneau)..."
